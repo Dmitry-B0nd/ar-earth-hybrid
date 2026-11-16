@@ -218,13 +218,13 @@
 import * as THREE from 'three';
 import Stats from 'three/addons/libs/stats.module.js';
 // ?v=… в адресах — чтобы браузер не взял старую версию файла из кэша
-import { createTracker } from './js/tracking.js?v=5.0h';
-import { createEarth, loadEarthTextures } from './js/earth.js?v=5.0h';
-import { createImu } from './js/imu.js?v=5.0h';
-import { createViewer3D } from './js/viewer3d.js?v=5.0h';
-import { createSatellites, loadSatellites } from './js/satellites.js?v=5.0h';
-import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=5.0h';
-const BUILD = '5.0h';
+import { createTracker } from './js/tracking.js?v=5.1h';
+import { createEarth, loadEarthTextures } from './js/earth.js?v=5.1h';
+import { createImu } from './js/imu.js?v=5.1h';
+import { createViewer3D } from './js/viewer3d.js?v=5.1h';
+import { createSatellites, loadSatellites } from './js/satellites.js?v=5.1h';
+import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=5.1h';
+const BUILD = '5.1h';
 console.log('[сборка]', BUILD, '| poi.js:', POI_VERSION);
 if (POI_VERSION !== BUILD) console.error('Файлы разных версий! index.html =', BUILD, ', js/poi.js =', POI_VERSION);
 
@@ -251,8 +251,9 @@ const P = {
   // рывок: при ускорении > jerka м/с² или повороте > jerkw °/с сцену быстро гасим и ищем метку заново (jerk=0 — выключить)
   // гибридный трекер (экспериментальная ветка): оптический поток в помощь MindAR; hybrid=0 — как в 4.14
   HYBRID: num('hybrid', 1), HYAGREE: num('hyagree', 6),
-  // с гибридом гашение на рывке по умолчанию выключено — проверяем, держит ли поток сам (jerk=1 — включить)
-  JERK: num('jerk', q.get('hybrid') === '0' ? 1 : 0), JERKA: num('jerka', 10), JERKW: num('jerkw', 200),
+  // hyovr=1 — поток может перебивать позу MindAR при сильном расхождении (в 5.0h было включено)
+  HYOVR: num('hyovr', 0),
+  JERK: num('jerk', 1), JERKA: num('jerka', 10), JERKW: num('jerkw', 200),
   // угол обзора камеры телефона по длинной стороне кадра, градусы (0 = как в MindAR по умолчанию, 45°)
   FOV: num('fov', 66),
   RAW: q.get('raw') === '1', JUMP: num('jump', 25), NOGUARD: q.get('noguard') === '1',
@@ -762,6 +763,7 @@ async function start(mode) {
     if (lite.bad >= 3) setLite(true, `авто: рисование ${fps} к/с, трекер ${AR ? loops : '—'} Гц`);
   }, 1000);
 
+  let lastEarthT = performance.now();
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     simT += Math.min(now - lastFrame, 250) * view.speed; lastFrame = now;
@@ -769,8 +771,9 @@ async function start(mode) {
     tracker.frame(now);
     if (AR && !P.WALL && !tracker.frozen && tracker.gravityInContent(gUp)) {   // при заморозке ось не трогаем
       qEarth.setFromUnitVectors(zAxis, gUp);
-      earthRoot.quaternion.slerp(qEarth, 0.15);
+      earthRoot.quaternion.slerp(qEarth, 1 - Math.pow(0.85, Math.min(100, now - lastEarthT) / 16.67));   // не зависит от частоты кадров
     }
+    lastEarthT = now;
     // в лёгком режиме рисуем не чаще ~30 раз в секунду (время видеокарты нужнее трекеру)
     const skipRender = lite.on && now - lastRender < 30;
     if (!skipRender) {

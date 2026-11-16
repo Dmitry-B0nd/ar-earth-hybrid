@@ -3,11 +3,11 @@
 // Единицы внутри content: ширина метки = 1, центр метки = (0,0,0), ось Z смотрит от метки вверх.
 import * as THREE from 'three';
 import { MindARThree } from 'mindar-image-three';
-import { createHybrid } from './hybrid.js?v=5.0h';
+import { createHybrid } from './hybrid.js?v=5.1h';
 
 export function createTracker(opts) {
   const { container, markerUrl, CF, BETA, MISS, WARM, SYNC, RAW, JUMP, NOGUARD, onFound, onLost, onStall, onFatal,
-          imu, USE_IMU = true, TOL = 20, IMULAG = 0, KMW = 0.03, COAST = 500, PREDICT = 1, CAMFPS = 60, JERK = 1, JERKA = 10, JERKW = 200, HYBRID = 0, HYAGREE = 6,
+          imu, USE_IMU = true, TOL = 20, IMULAG = 0, KMW = 0.03, COAST = 500, PREDICT = 1, CAMFPS = 60, JERK = 1, JERKA = 10, JERKW = 200, HYBRID = 0, HYAGREE = 6, HYOVR = 0,
           PMC = 2, PB = 5, DMC = 0.6, DB = 2, RMC, RB, DC = 1, FOV = 66 } = opts;
 
   // MindAR просит у камеры только «заднюю камеру» — iPhone тогда снимает 30 кадров/с.
@@ -107,6 +107,10 @@ export function createTracker(opts) {
     twistAng = 2 * Math.acos(Math.min(1, Math.abs(qTwist.w))) * 180 / Math.PI;
     swingAng = 2 * Math.acos(Math.min(1, Math.abs(qSwing.w))) * 180 / Math.PI;
   }
+  // Коэффициенты сглаживания настраивались на айфоне при 60 обновлениях в секунду. Чтобы на телефоне
+  // с 30 к/с всё вело себя так же по времени (а не вдвое медленнее), пересчитываем их по прошедшему времени.
+  const kdt = (k, dtMs) => 1 - Math.pow(1 - k, Math.min(100, Math.max(0, dtMs)) / 16.67);
+  let lastFuseT = 0;
   const qAngle = (a, b) => 2 * Math.acos(Math.min(1, Math.abs(a.dot(b)))) * 180 / Math.PI;
   // Метка почти горизонтальна → считаем строго горизонтальной (стол). Убирает остаточный наклон.
   function snapHorizontal() {
@@ -183,7 +187,7 @@ export function createTracker(opts) {
   //    возвращаем его в режим слежения с позой потока, без долгого поиска с нуля.
   //  • Когда MindAR и поток согласны — точки потока периодически пересеваем по MindAR (убираем накопленный увод).
   const hy = HYBRID ? createHybrid() : null;
-  const hyStats = { ms: 0, drive: 0, override: 0, revive: 0, diff: 0, sinceSeed: 0, disagree: 0 };
+  const hyStats = { ms: 0, drive: 0, override: 0, revive: 0, diff: 0, seedT: 0, disagree: 0 };
   let hyValid = false, hyH = null, hyM = null, hyDriving = false, hyShowUntil = -1e9, hyHoldUntil = -1e9, hySeedFrom = null;
   // Потоку без подтверждения MindAR верим недолго: он может «зацепиться» за фон и уверенно вести не туда.
   const HY_TRUST_MS = 700;
@@ -234,7 +238,6 @@ export function createTracker(opts) {
     hy.grab(mindar.video);
     const h = hy.track();
     hyStats.ms = hyStats.ms * 0.9 + (performance.now() - t0) * 0.1;
-    hyStats.sinceSeed++;
     if (!h) return;
     const M = HtoM(h);
     if (!M) return;
@@ -257,14 +260,16 @@ export function createTracker(opts) {
     if (!hyValid) { hySeedFrom = hm; hyConfirmed = performance.now(); return; }
     const d = hy.diff(hm, hyH, mw, mh);
     hyStats.diff = d;
-    if (d > HYAGREE && hy.count >= 15 && hy.inlierRatio >= 0.7 && hyStats.disagree < 20) {
+    // (по умолчанию выключено: на телефоне поток мог чуть «уплыть», и тогда он ошибочно перебивал верный MindAR)
+    if (HYOVR && d > HYAGREE && hy.count >= 15 && hy.inlierRatio >= 0.7 && hyStats.disagree < 20) {
       // MindAR «тащит» (смаз) — берём позу потока; но если не согласны долго — прав MindAR
       hyStats.disagree++; hyStats.override++;
       ts.currentModelViewTransform = hyM.map((r) => r.slice());
       setAnchorFromM(hyM);
     } else {
-      if (d <= HYAGREE) { hyStats.disagree = 0; hyConfirmed = performance.now(); }
-      else { hy.reset(); hyStats.disagree = 0; hyConfirmed = performance.now(); }   // долгое несогласие: поток сбился — пересеем по MindAR
+      // MindAR нашёл позу — он точнее и не накапливает увод; разошлись — поток пересеваем по MindAR
+      if (d > HYAGREE) hy.reset();
+      hyStats.disagree = 0; hyConfirmed = performance.now();
       hySeedFrom = hm;
     }
   }
@@ -284,9 +289,9 @@ export function createTracker(opts) {
       hyDriving = false;
       if (frameUpdated) hyStats.drive++;
     }
-    if (hySeedFrom && (hy.count < 32 || hyStats.sinceSeed > 45)) {
+    if (hySeedFrom && (hy.count < 32 || now - hyStats.seedT > 750)) {
       const [mw, mh] = markerDims();
-      if (hy.seed(hySeedFrom, mw, mh)) hyStats.sinceSeed = 0;
+      if (hy.seed(hySeedFrom, mw, mh)) hyStats.seedT = now;
     }
   }
 
@@ -395,9 +400,10 @@ export function createTracker(opts) {
 
     let fused = false;
     if (USE_IMU && imu && haveFrameQ) {
+      const tNow = performance.now(), dtU = lastFuseT ? tNow - lastFuseT : 16.67; lastFuseT = tNow;
       qWC.copy(qWCframe);
       qInst.copy(qWC).multiply(cQ);                                       // ориентация метки в мире по этому кадру
-      if (!recentN) qRecent.copy(qInst); else qRecent.slerp(qInst, 0.1);
+      if (!recentN) qRecent.copy(qInst); else qRecent.slerp(qInst, kdt(0.1, dtU));
       recentN++;
       if (!haveMW) { qMW.copy(qInst); snapHorizontal(); haveMW = true;
         console.log('[трекинг] ориентация метки:', snapped ? 'горизонтально' : 'наклон ' + markerTilt.toFixed(0) + '°'); }
@@ -409,12 +415,13 @@ export function createTracker(opts) {
       const dev = swingAng;                                               // насколько камера не согласна с гироскопом
       stats.imuAngSum += dev; stats.imuN++;
       const now = performance.now();
-      devAvg = devAvg === null ? dev : devAvg + 0.08 * (dev - devAvg);
+      devAvg = devAvg === null ? dev : devAvg + kdt(0.08, dtU) * (dev - devAvg);
 
       // согласны — подправляем ориентацию метки по камере (медленно)
       if (dev < HARD) {
-        const kT = Math.min(1, 0.05 + twistAng / 5);                      // 0,5° (шум) → медленно, ≥ 5° → сразу
-        qMW.premultiply(qT2.identity().slerp(qTwist, kT)).premultiply(qTmp.identity().slerp(qSwing, K));   // qDelta = qSwing·qTwist: сначала поворот вокруг оси
+        // поворот вокруг оси: дрожь камеры (до ~1°) сглаживаем сильно, настоящий поворот листка (≥ 5°) догоняем сразу
+        const u = Math.min(1, Math.max(0, (twistAng - 0.8) / 4.2)), kT = 0.03 + 0.97 * u * u * (3 - 2 * u);
+        qMW.premultiply(qT2.identity().slerp(qTwist, kdt(kT, dtU))).premultiply(qTmp.identity().slerp(qSwing, kdt(K, dtU)));   // qDelta = qSwing·qTwist: сначала поворот вокруг оси
         snapHorizontal();
       }
       // > 40° больше секунды — метку явно переложили: берём новую ориентацию
@@ -448,7 +455,7 @@ export function createTracker(opts) {
       // браузер с обратным знаком ускорения: метка «смотрит» строго вниз много кадров подряд → меняем знак
       if (ang > 150) { if (++gFlipVotes > 15) { gSign = -gSign; gFlipVotes = 0; gAngAvg = null; console.log('[датчики] знак акселерометра обратный — исправлено'); } }
       else gFlipVotes = 0;
-      gAngAvg = gAngAvg === null ? ang : gAngAvg + 0.05 * (ang - gAngAvg);
+      gAngAvg = gAngAvg === null ? ang : gAngAvg + 0.05 * (ang - gAngAvg);   // (только выбор режима — частота не важна)
       stats.imuAngSum += ang; stats.imuN++;
       if (gAngAvg < 25 && ang < 35) {                    // метка горизонтальна (стол), выброс камеры не больше 35°
         cQ.premultiply(qFixG.setFromUnitVectors(nrm, upFrame));
