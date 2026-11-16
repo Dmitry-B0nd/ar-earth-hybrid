@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AR: Земля над меткой</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: -apple-system, system-ui, sans-serif; }
+  #container { position: fixed; inset: 0; z-index: 0; overflow: hidden; }
+  #overlay {
+    position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px; padding: 24px;
+    background: #0a1430; color: #eef2fa; text-align: center;
+  }
+  #overlay h1 { margin: 0; font-size: 26px; line-height: 1.2; }
+  #overlay p { max-width: 32ch; line-height: 1.45; margin: 0; opacity: .85; }
+  #overlay .buttons { display: flex; flex-direction: column; gap: 10px; width: min(280px, 100%); }
+  #overlay button.secondary { background: rgba(255,255,255,.12); color: #fff; }
+  #overlay button:disabled { opacity: .6; }
+  #progress { font-size: 14px; opacity: .7; }
+  #overlay button {
+    width: 100%; font-size: 18px; padding: 14px 28px; border: 0; border-radius: 12px;
+    background: #ff9628; color: #0a1430; font-weight: 600;
+  }
+  #status {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top, 0px) + 12px); z-index: 5;
+    padding: 8px 14px; border-radius: 20px; font-size: 15px;
+    background: rgba(10, 20, 48, .75); color: #fff; display: none;
+  }
+  #status.found { background: rgba(30, 140, 70, .85); }
+  #params {
+    position: fixed; right: 8px; top: calc(env(safe-area-inset-top, 0px) + 56px); z-index: 5;
+    font: 12px/1.3 ui-monospace, monospace; color: #fff; background: rgba(0,0,0,.55);
+    padding: 4px 6px; border-radius: 6px; display: none; white-space: pre-wrap; max-width: calc(100vw - 16px); box-sizing: border-box;
+  }
+  #legend {
+    position: fixed; left: 10px; bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); z-index: 5;
+    display: none; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 10px;
+    background: rgba(10, 20, 48, .7); color: #fff; font-size: 13px;
+  }
+  #legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  #card {
+    position: fixed; left: 10px; right: 10px; z-index: 6;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
+    max-width: 480px; margin: 0 auto; border-radius: 16px;
+    display: flex; flex-direction: column; max-height: 45vh;
+    background: rgba(10, 20, 48, .96); color: #eef2fa; box-shadow: 0 8px 30px rgba(0,0,0,.4);
+    transform: translateY(130%); transition: transform .25s ease;
+  }
+  #card.open { transform: none; }
+  /* пока карточка открыта, элементы под ней не просвечивают */
+  body.card-open #legend, body.card-open #viewBtn, body.card-open #freezeBtn, body.card-open #viewPanel { visibility: hidden; }
+  /* развёрнутая карточка — почти на весь экран */
+  #card.full {
+    top: calc(env(safe-area-inset-top, 0px) + 10px); max-height: none; max-width: 640px;
+    background: rgba(10, 20, 48, .97);
+  }
+  #card .body {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain; padding: 16px 18px 12px;
+  }
+  #card .type { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; }
+  #card h2 { margin: 4px 0 2px; font-size: 20px; line-height: 1.2; padding-right: 36px; }
+  #card.full h2 { font-size: 24px; }
+  #card .country { font-size: 14px; opacity: .7; }
+  #card p { margin: 10px 0 0; font-size: 15px; line-height: 1.5; }
+  #card:not(.full) .full-only { display: none !important; }   /* фото, факты и подробности — только в развёрнутом виде */
+  #card img { width: 100%; max-height: 35vh; object-fit: cover; border-radius: 10px; margin-top: 12px; display: block; }
+  #card .facts { margin: 14px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 14px; }
+  #card .facts dt { opacity: .6; }
+  #card .facts dd { margin: 0; }
+  #card .details p { margin-top: 12px; }
+  #card .more {
+    flex: none; margin: 0 18px 16px; padding: 11px; border: 0; border-radius: 10px;
+    background: rgba(255,255,255,.12); color: #fff; font-size: 15px; font-weight: 600;
+  }
+  #viewBtn {
+    position: fixed; right: 10px; z-index: 5; display: none;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 84px);
+    padding: 10px 14px; border: 0; border-radius: 22px; font-size: 15px; font-weight: 600;
+    background: rgba(10, 20, 48, .8); color: #fff;
+  }
+  #viewPanel {
+    position: fixed; right: 10px; z-index: 6; display: none; width: min(300px, calc(100vw - 20px));
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 184px);
+    padding: 12px; border-radius: 14px; background: rgba(10, 20, 48, .94); color: #eef2fa;
+    box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 14px;
+  }
+  #viewPanel .row { margin-bottom: 12px; }
+  #viewPanel .row:last-child { margin-bottom: 0; }
+  #viewPanel .lbl { opacity: .7; font-size: 12px; margin-bottom: 6px; }
+  #viewPanel .seg { display: flex; gap: 4px; background: rgba(255,255,255,.08); border-radius: 10px; padding: 3px; }
+  #viewPanel .seg button {
+    flex: 1; padding: 8px 4px; border: 0; border-radius: 8px; background: none; color: #eef2fa; font-size: 14px;
+  }
+  #viewPanel .seg button.on { background: #ff9628; color: #0a1430; font-weight: 600; }
+  #viewPanel .now { width: 100%; padding: 9px; border: 0; border-radius: 10px; background: rgba(255,255,255,.12); color: #fff; font-size: 14px; }
+  #hint {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; display: none;
+    flex-direction: column; align-items: center; gap: 12px; padding: 18px 20px; border-radius: 16px;
+    background: rgba(10, 20, 48, .72); color: #fff; text-align: center; font-size: 16px; pointer-events: none;
+  }
+  #hint img { width: 120px; height: 120px; border-radius: 6px; opacity: .9; animation: hintPulse 2s ease-in-out infinite; }
+  @keyframes hintPulse { 50% { transform: scale(.92); opacity: .6; } }
+  #rotate {
+    position: fixed; inset: 0; z-index: 20; display: none; flex-direction: column; align-items: center;
+    justify-content: center; gap: 18px; background: #0a1430; color: #eef2fa; font-size: 18px; text-align: center; padding: 24px;
+  }
+  #rotate .phone {
+    width: 46px; height: 78px; border: 4px solid #eef2fa; border-radius: 10px; position: relative;
+    animation: rotPhone 2.2s ease-in-out infinite;
+  }
+  #rotate .phone::after { content: ''; position: absolute; left: 50%; bottom: 5px; width: 10px; height: 3px; margin-left: -5px; border-radius: 2px; background: #eef2fa; }
+  @keyframes rotPhone { 0%, 25% { transform: rotate(-90deg); } 60%, 100% { transform: rotate(0deg); } }
+  #stall {
+    position: fixed; left: 10px; right: 10px; top: calc(env(safe-area-inset-top, 0px) + 12px); z-index: 8; display: none;
+    max-width: 420px; margin: 0 auto; padding: 12px 14px; border-radius: 14px; align-items: center; gap: 10px;
+    background: rgba(120, 30, 30, .92); color: #fff; font-size: 15px;
+  }
+  #stall button { margin-left: auto; padding: 8px 12px; border: 0; border-radius: 10px; background: #fff; color: #5a1010; font-weight: 600; }
+  #freezeBtn {
+    position: fixed; right: 10px; z-index: 5; display: none;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 134px);
+    padding: 10px 14px; border: 0; border-radius: 22px; font-size: 15px; font-weight: 600;
+    background: rgba(10, 20, 48, .8); color: #fff;
+  }
+  #freezeBtn.on { background: #4fd1ff; color: #0a1430; }
+  #chooser {
+    position: fixed; z-index: 7; display: none; min-width: 180px; max-width: 70vw; padding: 6px;
+    border-radius: 12px; background: rgba(10, 20, 48, .94); box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  }
+  #chooser .hint { font-size: 12px; color: #fff; opacity: .6; padding: 4px 8px 6px; }
+  #chooser button {
+    display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 8px; border: 0;
+    background: none; color: #eef2fa; font-size: 15px; text-align: left; border-radius: 8px;
+  }
+  #chooser button:active { background: rgba(255,255,255,.12); }
+  #chooser i { flex: none; width: 10px; height: 10px; border-radius: 50%; }
+  #card .close {
+    position: absolute; z-index: 1; top: 10px; right: 10px; width: 32px; height: 32px; border: 0; border-radius: 50%;
+    background: rgba(255,255,255,.12); color: #fff; font-size: 18px; line-height: 32px; padding: 0;
+  }
+</style>
+
+<!-- Отладочная консоль (шестерёнка в углу) — только в режиме разработчика: ?dev=1 -->
+<script>
+  // Следим за потерей WebGL-контекстов (iOS может отобрать их при нехватке видеопамяти)
+  window.__glLost = 0;
+  for (const C of [window.HTMLCanvasElement, window.OffscreenCanvas]) {
+    if (!C || !C.prototype.getContext) continue;
+    const orig = C.prototype.getContext;
+    C.prototype.getContext = function (type, ...rest) {
+      const ctx = orig.call(this, type, ...rest);
+      if (ctx && /webgl/i.test(type) && !this.__glWatch) {
+        this.__glWatch = true;
+        const canvas = this;
+        canvas.addEventListener('webglcontextlost', () => {
+          window.__glLost++;
+          console.error('[gpu] потерян WebGL-контекст, холст', canvas.width + '×' + canvas.height);
+          window.dispatchEvent(new Event('gl-lost'));
+        });
+      }
+      return ctx;
+    };
+  }
+  window.T0 = performance.now();
+  window.DEV = /[?&]dev=1(&|$)/.test(location.search);
+  if (window.DEV) document.write('<script src="js/vendor/eruda/eruda.min.js"><\/script><script>eruda.init()<\/script>');
+</script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./js/vendor/three/three.module.min.js",
+    "three/addons/": "./js/vendor/three/addons/",
+    "mindar-image-three": "./js/vendor/mindar/mindar-image-three.prod.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="container"></div>
+<div id="status">Ищу метку…</div>
+<div id="params"></div>
+<div id="legend"></div>
+<div id="chooser"></div>
+<button id="viewBtn">Вид</button>
+<div id="viewPanel"></div>
+<div id="card">
+  <button class="close" aria-label="Закрыть">✕</button>
+  <div class="body">
+    <div class="type"></div>
+    <h2></h2>
+    <div class="country"></div>
+    <img class="full-only" alt="">
+    <p class="summary"></p>
+    <dl class="facts full-only"></dl>
+    <div class="details full-only"></div>
+  </div>
+  <button class="more">Подробнее</button>
+</div>
+<div id="hint"><img src="img/marker-hint.png" alt=""><div>Наведите камеру на метку</div></div>
+<button id="freezeBtn">Заморозить</button>
+<div id="rotate"><div class="phone"></div><div>Поверните телефон вертикально</div></div>
+<div id="stall"><span>Камера перестала отвечать</span><button onclick="location.reload()">Перезапустить</button></div>
+<div id="overlay">
+  <h1>Земля и спутники</h1>
+  <p id="msg">Наведите камеру телефона на метку — над ней появится Земля с настоящими спутниками на своих орбитах.</p>
+  <div class="buttons">
+    <button id="startBtn">Включить камеру</button>
+    <button id="btn3d" class="secondary">Смотреть без камеры</button>
+  </div>
+  <div id="progress">Загрузка…</div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import Stats from 'three/addons/libs/stats.module.js';
+// ?v=… в адресах — чтобы браузер не взял старую версию файла из кэша
+import { createTracker } from './js/tracking.js?v=4.14';
+import { createEarth, loadEarthTextures } from './js/earth.js?v=4.14';
+import { createImu } from './js/imu.js?v=4.14';
+import { createViewer3D } from './js/viewer3d.js?v=4.14';
+import { createSatellites, loadSatellites } from './js/satellites.js?v=4.14';
+import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=4.14';
+const BUILD = '4.14';
+console.log('[сборка]', BUILD, '| poi.js:', POI_VERSION);
+if (POI_VERSION !== BUILD) console.error('Файлы разных версий! index.html =', BUILD, ', js/poi.js =', POI_VERSION);
+
+const sec = () => ((performance.now() - window.T0) / 1000).toFixed(1) + ' с';
+console.log('[0] Библиотеки загружены через', sec());
+
+// ---------- Параметры из адреса страницы (например ?speed=1200&r=0.35) ----------
+const q = new URLSearchParams(location.search);
+const num = (k, d) => parseFloat(q.get(k) ?? d);
+const P = {
+  // трекинг (подобрано в День 1)
+  CF: num('cf', 1), BETA: num('beta', 0),
+  // сглаживание: направление на метку (pmc/pb), расстояние (dmc/db), поворот (rmc/rb), реакция на движение (dc)
+  PMC: num('pmc', 2), PB: num('pb', 5), DMC: num('dmc', 0.6), DB: num('db', 2),
+  RMC: q.has('rmc') ? num('rmc') : undefined, RB: q.has('rb') ? num('rb') : undefined, DC: num('dc', 1),
+  // датчики телефона: наклон метки берём из гироскопа (метка лежит на столе)
+  // поворот сцены — из гироскопа, камера медленно подправляет (kmw); imulag — задержка кадра камеры, мс
+  USE_IMU: q.get('imu') !== '0' && q.get('mount') !== 'wall', TOL: num('tol', 20),
+  IMULAG: num('imulag', 0), KMW: num('kmw', 0.03), COAST: num('coast', 500),
+  // подсказка трекеру, где метка будет на следующем кадре (0 — выключить)
+  PREDICT: num('predict', 1),
+  // частота кадров, которую просим у камеры (0 — как решит браузер, обычно 30)
+  CAMFPS: num('camfps', 60),
+  // рывок: при ускорении > jerka м/с² или повороте > jerkw °/с сцену быстро гасим и ищем метку заново (jerk=0 — выключить)
+  JERK: num('jerk', 1), JERKA: num('jerka', 10), JERKW: num('jerkw', 200),
+  // угол обзора камеры телефона по длинной стороне кадра, градусы (0 = как в MindAR по умолчанию, 45°)
+  FOV: num('fov', 66),
+  RAW: q.get('raw') === '1', JUMP: num('jump', 25), NOGUARD: q.get('noguard') === '1',
+  MISS: parseInt(q.get('miss') ?? '2'), WARM: parseInt(q.get('warm') ?? '2'), SYNC: q.get('sync') !== '0',
+  // сцена
+  SPEED: q.has('speed') ? num('speed') : null,   // ускорение времени; без параметра — из настроек «Вид» (по умолчанию ×120)
+  R: num('r', 0.45),                   // радиус Земли (в ширинах метки)
+  H: num('h', 0.55),                   // высота центра Земли над меткой (чем выше, тем сильнее видна дрожь)
+  WALL: q.get('mount') === 'wall',
+  REAL_SCALE: q.get('scale') === 'real',   // реальный масштаб орбит (по умолчанию художественный)     // метка на стене (ось Земли вдоль метки вверх), иначе на столе
+  DEBUG: q.get('debug') === '1',       // рамка и оси метки
+};
+const MARKER_FILE = './marker-bw.mind';
+
+const overlay = document.getElementById('overlay');
+const msg = document.getElementById('msg');
+const btn = document.getElementById('startBtn');
+const progress = document.getElementById('progress');
+const status = document.getElementById('status');
+const paramsBox = document.getElementById('params');
+
+const btn3d = document.getElementById('btn3d');
+function showError(text) {
+  msg.innerHTML = text;
+  btn.textContent = 'Попробовать снова';
+  btn.disabled = false;
+  btn3d.disabled = false;
+  overlay.style.display = 'flex';
+  status.style.display = 'none';
+}
+// переход в другой режим — перезагрузкой страницы (так ничего не остаётся от предыдущего режима)
+function reloadWithMode(mode) {
+  const u = new URL(location.href);
+  if (mode) u.searchParams.set('mode', mode); else u.searchParams.delete('mode');
+  location.href = u.toString();
+}
+
+// ---------- Загрузка начинается сразу, не дожидаясь кнопки ----------
+let loaded = 0; const TOTAL = 7;
+const tick = () => { loaded++; progress.textContent = loaded < TOTAL ? `Загружено ${loaded} из ${TOTAL}` : 'Всё загружено'; };
+
+const tMarker = performance.now();
+const markerPromise = fetch(MARKER_FILE, { cache: 'no-store' }).then(async (r) => {
+  if (r.status === 404) throw Object.assign(new Error('404'), { notFound: true });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const buf = await r.arrayBuffer();
+  console.log('[1] Метка получена:', buf.byteLength, 'байт за', Math.round(performance.now() - tMarker), 'мс');
+  tick();
+  return URL.createObjectURL(new Blob([buf]));
+});
+markerPromise.catch(() => {});
+
+const tTex = performance.now();
+const texPromise = loadEarthTextures('./textures/', tick).then((t) => {
+  console.log('[1] Текстуры Земли загружены за', Math.round(performance.now() - tTex), 'мс');
+  return t;
+});
+texPromise.catch(() => {});
+
+const poiPromise = loadPoi('./data/poi.json').then((d) => { tick(); console.log('[1] Точек интереса:', d.points.length); return d; });
+poiPromise.catch(() => {});
+
+const imu = createImu();
+
+const satPromise = loadSatellites('./data/satellites.json').then((d) => {
+  tick();
+  if (!d) console.warn('[1] Нет data/satellites.json — запусти на компьютере: node tools\\update-data.mjs');
+  else console.log('[1] Спутников:', d.sats.length, '| данные от', d.generated);
+  return d;
+});
+satPromise.catch(() => {});
+// тексты карточек спутников читаем прямо из satellites-extra.json — правки видны после обновления страницы,
+// перезапускать скрипт загрузки данных не нужно
+const satTextsPromise = fetch('./data/satellites-extra.json', { cache: 'no-store' })
+  .then((r) => (r.ok ? r.json() : null)).catch((e) => { console.warn('satellites-extra.json:', e); return null; });
+
+let started = false;
+async function start(mode) {
+  if (started) { reloadWithMode(mode === '3d' ? '3d' : null); return; }   // повторный запуск — с чистого листа
+  started = true;
+  const AR = mode !== '3d';
+  // доступ к датчикам спрашиваем самым первым — iOS разрешает это только сразу после нажатия
+  const imuPermission = AR && P.USE_IMU ? imu.request() : Promise.resolve(false);
+  console.log('[кнопка] нажата через', sec(), 'после открытия, режим', AR ? 'AR' : '3D');
+  btn.disabled = true; btn3d.disabled = true;
+  (AR ? btn : btn3d).textContent = 'Загрузка…';
+
+  let markerUrl = null, textures;
+  if (AR) try {
+    markerUrl = await markerPromise;
+  } catch (e) {
+    console.error('Ошибка загрузки файла метки:', e);
+    showError(e.notFound
+      ? `Не найден файл <b>${MARKER_FILE.slice(2)}</b>.<br>Он должен лежать в папке рядом с index.html.`
+      : 'Не удалось скачать файл метки.<br>Пришли скриншот консоли (шестерёнка внизу справа).');
+    return;
+  }
+  try {
+    textures = await texPromise;
+  } catch (e) {
+    console.error('Ошибка загрузки текстур:', e);
+    showError('Не найдены текстуры Земли.<br>Папка <b>textures</b> должна лежать рядом с index.html.');
+    return;
+  }
+
+  let poiData;
+  try {
+    poiData = await poiPromise;
+  } catch (e) {
+    console.error('Ошибка загрузки точек интереса:', e);
+    showError('Не удалось прочитать <b>data/poi.json</b>.<br>Скорее всего, в файле ошибка (лишняя или пропущенная запятая, кавычка). Подробности в консоли.');
+    return;
+  }
+
+  const imuOk = await imuPermission;
+  if (AR) console.log('[датчики]', P.USE_IMU ? (imuOk ? 'доступ есть' : 'доступа нет — работаем только по камере') : 'выключены');
+  const container = document.getElementById('container');
+  const tracker = AR ? createTracker({
+    container, markerUrl, ...P, imu: imuOk ? imu : null,
+    onFound: () => { status.textContent = 'Метка найдена'; status.classList.add('found'); },
+    onLost:  () => { status.textContent = 'Ищу метку…';   status.classList.remove('found'); },
+    onStall: () => { document.getElementById('stall').style.display = 'flex'; },
+    onFatal: (why) => {
+      console.error('[камера] восстановление через перезагрузку:', why);
+      try { sessionStorage.setItem('ar-resume', why); } catch (e) {}
+      setTimeout(() => location.reload(), 300);
+    },
+  }) : createViewer3D({ container });
+  const { renderer, scene, camera, content } = tracker;
+  if (window.DEV) window.__tracker = tracker;      // для отладки из консоли
+
+  // ---------- Сцена ----------
+  const earthRoot = new THREE.Group();
+  earthRoot.position.set(0, 0, P.H);
+  content.add(earthRoot);
+  const earth = createEarth({ radius: P.R, textures, renderer });
+  if (P.WALL && AR) earth.group.rotation.x = -Math.PI / 2;     // ось Земли — вверх вдоль метки
+  earthRoot.add(earth.group);
+  if (!AR) tracker.setTarget(P.H);
+  const poi = createPoi({ earth, data: poiData });
+
+  let satData = null;
+  try { satData = await satPromise; } catch (e) { console.error('Ошибка чтения data/satellites.json:', e); }
+  const sats = satData ? createSatellites({ earth, data: satData, scene, artistic: !P.REAL_SCALE }) : null;
+  const satTexts = (await satTextsPromise) || {};
+  const ctxText = Object.fromEntries((satTexts.context || []).map((c) => [c.key, c]));
+  const smallText = satTexts.smallSat || {};
+  if (sats) console.log('[спутники] на сцене:', sats.count);
+
+  const legend = document.getElementById('legend');
+  legend.innerHTML = [...Object.values(poiData.types), ...(satData ? Object.values(satData.groups) : [])]
+    .map((t) => `<div><i style="background:${t.color}"></i>${t.label}</div>`).join('');
+
+  // ---- Карточка ----
+  const card = document.getElementById('card');
+  const cardImg = card.querySelector('img');
+  const cardBody = card.querySelector('.body');
+  const moreBtn = card.querySelector('.more');
+  const facts = card.querySelector('.facts');
+  const details = card.querySelector('.details');
+
+  function setFull(on) {
+    card.classList.toggle('full', on);
+    moreBtn.textContent = on ? 'Свернуть' : 'Подробнее';
+    cardBody.scrollTop = 0;
+  }
+
+  // Карточка принимает «описание объекта»:
+  // { color, typeLabel, name, sub, description, image, facts, details, live(): факты, обновляемые на лету }
+  let liveTimer = null, current = null;
+  function fillFacts(obj) {
+    facts.innerHTML = '';
+    for (const [k, v] of Object.entries(obj || {})) {
+      if (v === '' || v == null) continue;
+      const dt = document.createElement('dt'); dt.textContent = k;
+      const dd = document.createElement('dd'); dd.textContent = v;
+      facts.append(dt, dd);
+    }
+  }
+  function showCard(info) {
+    current = info;
+    card.querySelector('.type').textContent = info.typeLabel || '';
+    card.querySelector('.type').style.color = info.color || '#fff';
+    card.querySelector('h2').textContent = info.name;
+    card.querySelector('.country').textContent = info.sub || '';
+    card.querySelector('.summary').textContent = info.description || '';
+    if (info.image) { cardImg.src = info.image; cardImg.style.display = ''; }
+    else { cardImg.removeAttribute('src'); cardImg.style.display = 'none'; }
+    const allFacts = () => ({ ...(info.live ? info.live() : {}), ...(info.facts || {}) });
+    fillFacts(allFacts());
+    clearInterval(liveTimer);
+    if (info.live) liveTimer = setInterval(() => { if (current === info) fillFacts(allFacts()); }, 500);
+    details.innerHTML = '';
+    const paras = Array.isArray(info.details) ? info.details : (info.details ? String(info.details).split(/\n\s*\n/) : []);
+    for (const t of paras) { const el = document.createElement('p'); el.textContent = t; details.appendChild(el); }
+    moreBtn.style.display = (info.image || paras.length || Object.keys(allFacts()).length) ? '' : 'none';
+    setFull(false);
+    card.classList.add('open');
+    document.body.classList.add('card-open');
+  }
+
+  // точка интереса → карточка
+  function poiInfo(p) {
+    const t = poiData.types[p.type] || { label: '', color: '#fff' };
+    return { color: t.color, typeLabel: t.label, name: p.name, sub: p.country, description: p.description,
+             image: p.image, facts: p.facts, details: p.details, isHidden: () => !poi.group.visible };
+  }
+  // спутник → карточка
+  const COUNTRY = { RU: 'Россия', US: 'США', CN: 'Китай', JP: 'Япония', DE: 'Германия', FR: 'Франция', IT: 'Италия',
+    ES: 'Испания', GB: 'Великобритания', IN: 'Индия', KR: 'Республика Корея', CA: 'Канада', AU: 'Австралия',
+    BR: 'Бразилия', NL: 'Нидерланды', BE: 'Бельгия', CH: 'Швейцария', AT: 'Австрия', PL: 'Польша', CZ: 'Чехия',
+    FI: 'Финляндия', SE: 'Швеция', NO: 'Норвегия', DK: 'Дания', LT: 'Литва', LU: 'Люксембург', IL: 'Израиль',
+    TR: 'Турция', AE: 'ОАЭ', SG: 'Сингапур', TW: 'Тайвань', TH: 'Таиланд', MX: 'Мексика', AR: 'Аргентина',
+    CL: 'Чили', PE: 'Перу', ZA: 'ЮАР', NZ: 'Новая Зеландия', HU: 'Венгрия', PT: 'Португалия', GR: 'Греция',
+    UA: 'Украина', KZ: 'Казахстан', BY: 'Беларусь', EE: 'Эстония', SI: 'Словения', SK: 'Словакия', BG: 'Болгария',
+    VN: 'Вьетнам', ID: 'Индонезия', MY: 'Малайзия', PH: 'Филиппины', EG: 'Египет', NG: 'Нигерия', KE: 'Кения',
+    IE: 'Ирландия', EU: 'Европа', INT: 'Международный' };
+  const countryName = (c) => String(c || '').split(/[,\s]+/).filter(Boolean).map((x) => COUNTRY[x.toUpperCase()] || x).join(', ');
+  function satInfo(it) {
+    const s = it.s, g = (satData.groups || {})[s.group] || { label: '', color: '#fff' };
+    const isSmall = s.group === 'cubesat';
+    const year = s.launched ? s.launched.slice(0, 4) : '';
+    if (!isSmall) {
+      const t = ctxText[s.key] || s;                       // свежие тексты из satellites-extra.json
+      return {
+        color: g.color, typeLabel: t.kind || g.label, name: s.name, sub: t.country,
+        description: t.description, details: t.details,
+        facts: { ...(t.facts || {}), 'Номер NORAD': String(s.id) },
+        live: () => sats.liveFacts(it, simDate), isHidden: () => !sats.isShown(it),
+      };
+    }
+    const tpl = (s.cube ? smallText.cubeDescription : smallText.otherDescription) ||
+      (s.cube ? 'Малый спутник формата CubeSat{year}.' : 'Малый спутник{year}.');
+    return {
+      color: g.color, typeLabel: s.cube ? 'Кубсат' : 'Малый спутник', name: s.name,
+      sub: [countryName(s.country), s.operator].filter(Boolean).join(' · '),
+      description: tpl.replace('{year}', year ? ', запущен в ' + year + ' году' : ''),
+      details: smallText.details || [],
+      facts: {
+        'Страна': countryName(s.country), 'Оператор': s.operator || '',
+        'Запущен': s.launched ? new Date(s.launched).toLocaleDateString('ru-RU') : '',
+        'Номер NORAD': String(s.id), 'Сайт': s.website || '',
+      },
+      live: () => sats.liveFacts(it, simDate), isHidden: () => !sats.isShown(it),
+    };
+  }
+
+  function openPoi(p) { sats && sats.select(null); poi.select(p.id); showCard(poiInfo(p)); }
+  function openSat(it) { poi.select(null); sats.select(it); showCard(satInfo(it)); }
+  function closeCard() { clearInterval(liveTimer); current = null; setFull(false); card.classList.remove('open'); document.body.classList.remove('card-open'); poi.select(null); sats && sats.select(null); }
+  card.querySelector('.close').addEventListener('click', closeCard);
+  moreBtn.addEventListener('click', () => setFull(!card.classList.contains('full')));
+  // режим разработчика: открыть карточку из консоли — __card('iss'), __card('baikonur'), __card('small')
+  if (window.DEV) window.__card = (key) => {
+    const p = poiData.points.find((x) => x.id === key);
+    if (p) return openPoi(p);
+    const it = sats && sats.items.find((x) => key === 'small' ? x.s.group === 'cubesat' && x.ok : x.s.key === key);
+    if (it) return openSat(it);
+    console.warn('нет объекта', key);
+  };
+
+  // ---- Тап по точке ----
+  // Зона нажатия — радиус в пикселях вокруг точки на экране (одинаковая на любом расстоянии).
+  // Если рядом с пальцем несколько точек примерно на равном расстоянии — показываем список.
+  // Настраиваются в ссылке: ?tap=30&sure=12&amb=8&rival=22
+  const TAP_RADIUS = num('tap', 30);    // px: в этом радиусе от пальца точка считается задетой
+  const SURE = num('sure', 12);         // px: попал ближе этого к точке — открываем её сразу, без списка
+  const AMBIGUOUS = num('amb', 8);      // px: соседка «спорная», только если дальше первой меньше чем на столько…
+  const RIVAL = num('rival', 22);       // px: …и сама не дальше этого от пальца
+  const chooser = document.getElementById('chooser');
+  function closeChooser() { chooser.style.display = 'none'; }
+  function openChooser(cands, x, y) {
+    chooser.innerHTML = '<div class="hint">Что открыть?</div>';
+    for (const c of cands.slice(0, 6)) {
+      const btn = document.createElement('button');
+      btn.innerHTML = `<i style="background:${c.color}"></i><span></span>`;
+      btn.querySelector('span').textContent = c.name;
+      btn.addEventListener('click', () => { closeChooser(); c.open(); });
+      chooser.appendChild(btn);
+    }
+    chooser.style.display = 'block';
+    // рядом с пальцем, но в пределах экрана
+    const w = chooser.offsetWidth, h = chooser.offsetHeight, m = 8;
+    let left = x - w / 2, top = y - h - 20;
+    if (top < m + 50) top = y + 20;
+    left = Math.max(m, Math.min(window.innerWidth - w - m, left));
+    top = Math.max(m, Math.min(window.innerHeight - h - m, top));
+    chooser.style.left = left + 'px'; chooser.style.top = top + 'px';
+  }
+
+  let down = null;
+  window.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+  window.addEventListener('pointerup', (e) => { try { onTap(e); } catch (err) { console.error('Ошибка обработки тапа:', err); } });
+  function onTap(e) {
+    const inUi = card.contains(e.target) || chooser.contains(e.target) || e.target.closest('#viewBtn, #viewPanel, #freezeBtn, .eruda-container, #eruda');
+    if (!down || inUi) { down = null; return; }
+    const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+    const quick = performance.now() - down.t < 500;
+    down = null;
+    if (moved > 12 || !quick) return;
+    closeChooser();
+    if (!tracker.shown) { console.log('Тап: метка сейчас не найдена'); return; }
+    const rect = renderer.domElement.getBoundingClientRect();   // холст бывает больше экрана
+    // кандидаты из точек интереса и спутников — в общем списке
+    const cands = [
+      ...(poi.group.visible ? poi.pickScreen(e.clientX, e.clientY, camera, rect, TAP_RADIUS) : []).map((c) => ({
+        d: c.d, name: c.p.name, color: (poiData.types[c.p.type] || {}).color || '#fff', open: () => openPoi(c.p) })),
+      ...(sats ? sats.pickScreen(e.clientX, e.clientY, camera, rect, TAP_RADIUS).map((c) => ({
+        d: c.d, name: c.it.s.name, color: '#' + c.it.color.getHexString(), open: () => openSat(c.it) })) : []),
+    ].sort((a, b) => a.d - b.d);
+    if (!cands.length) { console.log('Тап мимо объектов'); closeCard(); return; }
+    const close = cands[0].d <= SURE ? [cands[0]]
+      : cands.filter((c) => c.d - cands[0].d < AMBIGUOUS && c.d <= RIVAL);
+    if (close.length > 1) { console.log('Спорный тап:', close.map((c) => c.name).join(', ')); openChooser(close, e.clientX, e.clientY); }
+    else { console.log('Тап:', cands[0].name); cands[0].open(); }
+  }
+
+  if (P.DEBUG && AR) {
+    content.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 1)),
+      new THREE.LineBasicMaterial({ color: 0xff9628 })));
+    content.add(new THREE.AxesHelper(0.4));
+  }
+
+  const stats = window.DEV ? new Stats() : null;
+  if (stats) { stats.dom.style.top = 'calc(env(safe-area-inset-top, 0px) + 4px)'; document.body.appendChild(stats.dom); }
+
+  let video = null;
+  if (AR) {
+    try {
+      video = await tracker.start();
+    } catch (e) {
+      console.error('Ошибка запуска AR:', e);
+      showError('Нет доступа к камере.<br>Разрешите доступ («Настройки → Safari → Камера») и нажмите «Попробовать снова» — или смотрите без камеры.');
+      btn.onclick = () => reloadWithMode(null); btn3d.onclick = () => reloadWithMode('3d');
+      return;
+    }
+  }
+  console.log('[готово]', AR ? 'AR' : '3D', 'запущен через', sec(), 'после открытия страницы');
+  overlay.style.display = 'none';
+  if (window.DEV && AR) status.style.display = 'block';
+  if (window.DEV) paramsBox.style.display = 'block';
+  legend.style.display = 'flex';
+
+  // ---- подсказка «наведите на метку» и кнопка «Заморозить» (только AR) ----
+  const hint = document.getElementById('hint');
+  const freezeBtn = document.getElementById('freezeBtn');
+  let hiddenSince = performance.now();
+  if (AR) {
+    freezeBtn.style.display = 'block';
+    freezeBtn.addEventListener('click', () => {
+      if (!tracker.frozen && !tracker.shown) return;            // нечего замораживать, пока метка не найдена
+      tracker.setFrozen(!tracker.frozen);
+      freezeBtn.classList.toggle('on', tracker.frozen);
+      freezeBtn.textContent = tracker.frozen ? 'Продолжить' : 'Заморозить';
+    });
+  }
+
+  // ---------- Настройки вида (запоминаются в браузере) ----------
+  const VIEW_KEY = 'ar-earth-view';
+  const view = { speed: 120, small: 'all', context: true, poi: true };
+  try { Object.assign(view, JSON.parse(localStorage.getItem(VIEW_KEY) || '{}')); } catch (e) {}
+  if (P.SPEED != null) view.speed = P.SPEED;
+  const saveView = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch (e) {} };
+
+  // ---------- Время симуляции: идёт с выбранным ускорением, переключение без скачков ----------
+  const simDate = new Date();
+  let simT = Date.now(), lastFrame = performance.now();
+  const fmt = (d) => d.toISOString().slice(5, 16).replace('T', ' ');
+
+  const viewBtn = document.getElementById('viewBtn');
+  const viewPanel = document.getElementById('viewPanel');
+  const nSmall = sats ? sats.items.filter((it) => it.s.group === 'cubesat').length : 0;
+  const nCube = sats ? sats.items.filter((it) => it.s.cube).length : 0;
+  const ROWS = [
+    { key: 'speed', label: 'Скорость времени', opts: [[1, '×1'], [30, '×30'], [120, '×120'], [600, '×600']] },
+    ...(sats ? [
+      { key: 'small', label: 'Малые спутники', opts: [['all', `Все (${nSmall})`], ['cube', `Кубсаты (${nCube})`], ['none', 'Скрыть']] },
+      { key: 'context', label: 'Станции и метеоспутники', opts: [[true, 'Показать'], [false, 'Скрыть']] },
+    ] : []),
+    { key: 'poi', label: 'Точки на Земле', opts: [[true, 'Показать'], [false, 'Скрыть']] },
+  ];
+  function applyView() {
+    if (sats) sats.setFilter({ small: view.small, context: view.context });
+    poi.group.visible = view.poi;
+    if (current && current.isHidden && current.isHidden()) closeCard();
+  }
+  function renderPanel() {
+    viewPanel.innerHTML = '';
+    for (const r of ROWS) {
+      const row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = `<div class="lbl">${r.label}</div><div class="seg"></div>`;
+      for (const [v, t] of r.opts) {
+        const b = document.createElement('button');
+        b.textContent = t; if (view[r.key] === v) b.className = 'on';
+        b.addEventListener('click', () => { view[r.key] = v; saveView(); applyView(); renderPanel(); });
+        row.querySelector('.seg').appendChild(b);
+      }
+      viewPanel.appendChild(row);
+    }
+    const nowBtn = document.createElement('button'); nowBtn.className = 'now';
+    nowBtn.textContent = 'Вернуть текущее время';
+    nowBtn.addEventListener('click', () => { simT = Date.now(); });
+    viewPanel.appendChild(nowBtn);
+    const modeBtn = document.createElement('button'); modeBtn.className = 'now'; modeBtn.style.marginTop = '8px';
+    modeBtn.textContent = AR ? 'Смотреть без камеры' : 'Включить камеру (AR)';
+    modeBtn.addEventListener('click', () => reloadWithMode(AR ? '3d' : null));
+    viewPanel.appendChild(modeBtn);
+  }
+  viewBtn.addEventListener('click', () => {
+    const open = viewPanel.style.display !== 'block';
+    viewPanel.style.display = open ? 'block' : 'none';
+    if (open) renderPanel();
+  });
+  viewBtn.style.display = 'block';
+  applyView();
+
+  // строка про датчики: доля поз с наклоном из гироскопа и среднее расхождение камеры с гироскопом
+  const imuLine = () => {
+    if (!AR) return 'режим без камеры';
+    const st = tracker.stats;
+    if (!P.USE_IMU) return 'датчики: выкл';
+    if (!imuOk) return 'датчики: нет доступа';
+    const d = imu.diag;
+    // что реально присылает телефон: ориентация (обычная / компасная, с данными / пустая), движение, «вверх»
+    const raw = `ориент. ${d.rel}/${d.relNull} компас ${d.abs}/${d.absNull} движ. ${d.mot} g ${d.grav}`;
+    if (!imu.fresh() && !(imu.gravFresh && imu.gravFresh())) return 'датчики: нет данных\n' + raw;
+    const div = st.imuN ? (st.imuAngSum / st.imuN).toFixed(1) + '°' : '—';
+    const share = st.updates ? Math.round(100 * st.fused / st.updates) + '%' : '—';
+    const pk = imu.takePeaks();
+    const mot = imu.hasMotion ? `пик ${imu.hasAcc ? pk.a.toFixed(1) + ' м/с²' : 'а —'} ${Math.round(pk.w)}°/с` : 'акселерометр: нет данных';
+    const src = imu.fresh() ? imu.source : 'акселерометр';
+    return `датчики (${src}) ${share}  расх. ${div}\n${raw}\nметка: ${tracker.markerState}\nперезахв. ${st.redetect}  удерж. ${st.coast}  предск. ${st.pred}\nрывков ${st.jerks}  ${mot}`;
+  };
+  // камера: размер кадра, частота, которую обещает камера, и сколько новых кадров реально пришло за секунду
+  const camLine = () => {
+    const v = tracker.mindar.video, trk = v && v.srcObject && v.srcObject.getVideoTracks()[0];
+    const fr = trk && trk.getSettings ? trk.getSettings().frameRate : null;
+    return `камера ${v ? v.videoWidth + '×' + v.videoHeight : '—'}  ${fr ? Math.round(fr) + ' к/с' : ''}  новых ${tracker.stats.newFrames}\n` +
+      `режим: ${lite.on ? 'лёгкий (' + lite.why + ')' : 'обычный'}  рисование ${lite.fps}\n`;
+  };
+  if (window.DEV) setInterval(() => {
+    paramsBox.textContent = `сборка ${BUILD}\n` +
+      `время UTC ${fmt(simDate)}  ×${view.speed}\n` +
+      (AR ? camLine() + `трекер ${tracker.stats.updates} Гц  отсев ${tracker.stats.rejected}\n` : '') +
+      imuLine();
+    if (AR) { const st = tracker.stats; st.updates = 0; st.rejected = 0; st.fused = 0; st.imuAngSum = 0; st.imuN = 0; st.newFrames = 0; }
+  }, 1000);
+
+  // ---- Горизонтальная ориентация: в AR показываем заставку и ставим распознавание на паузу ----
+  if (AR) {
+    const rotateEl = document.getElementById('rotate');
+    const isLandscape = () => window.innerWidth > window.innerHeight;
+    let landscapeTimer = null;
+    const onOrient = () => {
+      clearTimeout(landscapeTimer);
+      // небольшая задержка: во время поворота размеры окна «прыгают»
+      landscapeTimer = setTimeout(() => {
+        const land = isLandscape();
+        rotateEl.style.display = land ? 'flex' : 'none';
+        tracker.setPaused(land);
+        // при повороте заморозка снимается — кнопку приводим в соответствие
+        freezeBtn.classList.toggle('on', tracker.frozen);
+        freezeBtn.textContent = tracker.frozen ? 'Продолжить' : 'Заморозить';
+        if (land) console.log('[экран] горизонтально — пауза');
+        else console.log('[экран] вертикально — продолжаем');
+      }, 250);
+    };
+    window.addEventListener('resize', onOrient);
+    window.addEventListener('orientationchange', onOrient);
+    onOrient();
+  }
+
+  // Ось Земли всегда «вверх» по гироскопу — даже если метку показали на мониторе или держат в руке
+  const gUp = new THREE.Vector3(), zAxis = new THREE.Vector3(0, 0, 1), qEarth = new THREE.Quaternion();
+
+  // ---- Лёгкий режим для слабых телефонов ----
+  // Распознавание метки и рисование сцены делят одну видеокарту. Если телефон не тянет
+  // (сцена рисуется < 40 кадров/с или трекер при видимой метке < 22 раз/с три секунды подряд),
+  // облегчаем незаметно для глаза: рисуем не чаще 30 кадров/с, спутники пересчитываем реже, камера 30 к/с.
+  // (Понижение чёткости и отключение облаков пробовали в 4.13 — трекер не ускорился, картинка стала мыльной.)
+  // ?potato=1 — включить сразу, ?potato=0 — никогда не включать.
+  const POTATO = q.get('potato');
+  const lite = { on: false, why: '', bad: 0, fps: 0, loops: 0, since: performance.now() };
+  let lastRender = 0, renders = 0;
+  function setLite(on, why) {
+    if (lite.on === on) return;
+    lite.on = on; lite.why = why;
+    if (AR) tracker.setLite(on);
+    earth.setLite(on);
+    if (sats) sats.setLite(on);
+    console.log('[качество]', on ? 'лёгкий режим —' : 'обычный режим —', why);
+  }
+  if (POTATO === '1') setLite(true, 'вручную');
+  setInterval(() => {
+    const fps = renders; renders = 0;
+    const loops = AR ? tracker.loops - lite.loops : 0; if (AR) lite.loops = tracker.loops;
+    lite.fps = fps; lite.loopRate = loops;
+    if (lite.on || POTATO === '0' || document.hidden || performance.now() - lite.since < 3000) return;
+    if (AR && (tracker.frozen || tracker.restarting)) { lite.bad = 0; return; }
+    const slowTrack = AR && tracker.shown && loops < 22;
+    if (fps < 40 || slowTrack) lite.bad++; else lite.bad = 0;
+    if (lite.bad >= 3) setLite(true, `авто: рисование ${fps} к/с, трекер ${AR ? loops : '—'} Гц`);
+  }, 1000);
+
+  renderer.setAnimationLoop(() => {
+    const now = performance.now();
+    simT += Math.min(now - lastFrame, 250) * view.speed; lastFrame = now;
+    simDate.setTime(simT);
+    tracker.frame(now);
+    if (AR && !P.WALL && !tracker.frozen && tracker.gravityInContent(gUp)) {   // при заморозке ось не трогаем
+      qEarth.setFromUnitVectors(zAxis, gUp);
+      earthRoot.quaternion.slerp(qEarth, 0.15);
+    }
+    // в лёгком режиме рисуем не чаще ~30 раз в секунду (время видеокарты нужнее трекеру)
+    const skipRender = lite.on && now - lastRender < 30;
+    if (!skipRender) {
+      earth.update(simDate);
+      poi.update(now / 1000, camera);
+      if (sats) sats.update(simDate, renderer, earth.sunWorld, camera);
+      renderer.render(scene, camera);
+      lastRender = now; renders++;
+    }
+    if (stats) stats.update();
+    // подсказка появляется, если метки не видно дольше 1,5 с
+    if (AR) {
+      if (tracker.shown || tracker.frozen) hiddenSince = now;
+      const showHint = now - hiddenSince > 1500 && !card.classList.contains('open');
+      if ((hint.style.display === 'flex') !== showHint) hint.style.display = showHint ? 'flex' : 'none';
+    }
+  });
+}
+
+window.addEventListener('unhandledrejection', (ev) => {
+  const e = ev.reason;
+  console.error('Необработанная ошибка:', e, e && e.stack);
+  showError('Что-то пошло не так: <b>' + (e && e.message ? e.message : e) + '</b><br>Попробуйте обновить страницу или смотрите без камеры.');
+});
+
+// После автоматической перезагрузки (камера не восстановилась) — одна кнопка, чтобы продолжить.
+// Нажатие нужно: без него iOS не даст доступ к датчикам движения.
+try {
+  const why = sessionStorage.getItem('ar-resume');
+  if (why) {
+    sessionStorage.removeItem('ar-resume');
+    console.warn('[камера] страница перезагружена:', why);
+    msg.innerHTML = 'Камеру пришлось перезапустить.<br>Нажмите, чтобы продолжить.';
+    btn.textContent = 'Продолжить';
+  }
+} catch (e) {}
+
+btn.addEventListener('click', () => start('ar'));
+btn3d.addEventListener('click', () => start('3d'));
+if (q.get('mode') === '3d') start('3d');       // ссылка сразу в режим без камеры
+</script>
+</body>
+</html>
