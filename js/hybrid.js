@@ -28,7 +28,7 @@ export function createHybrid({ scale = 0.5, levels = 4, win = 13, maxPts = 64, m
   const mask = new jsfeat.matrix_t(maxPts, 1, U8);
   const from = Array.from({ length: maxPts }, () => ({ x: 0, y: 0 }));
   const to = Array.from({ length: maxPts }, () => ({ x: 0, y: 0 }));
-  const stats = { ms: 0, seeds: 0, lost: 0 };
+  const stats = { ms: 0, grabMs: 0, seeds: 0, lost: 0 };
 
   function alloc(w, h) {
     W = w; H = h; cv.width = w; cv.height = h;
@@ -68,17 +68,21 @@ export function createHybrid({ scale = 0.5, levels = 4, win = 13, maxPts = 64, m
     get size() { return [W, H]; },
     reset() { n = 0; },
 
+    scale,
     // Новый кадр камеры: в оттенки серого, уменьшить, построить пирамиду уменьшенных копий.
-    grab(video) {
-      const vw = video.videoWidth, vh = video.videoHeight;
+    // src — видео или холст (лучше холст MindAR: на нём кадр уже готов, второй раз распаковывать видео не нужно)
+    grab(src) {
+      const t0 = performance.now();
+      const vw = src.videoWidth || src.width, vh = src.videoHeight || src.height;
       if (!vw || !vh) return false;
       const w = Math.round(vw * scale), h = Math.round(vh * scale);
       if (w !== W || h !== H) alloc(w, h);
       const t = prev; prev = curr; curr = t;
-      ctx.drawImage(video, 0, 0, w, h);
+      ctx.drawImage(src, 0, 0, w, h);
       jsfeat.imgproc.grayscale(ctx.getImageData(0, 0, w, h).data, w, h, curr.data[0]);
       curr.build(curr.data[0], true);
       const had = hasPrev; hasPrev = true;
+      stats.grabMs = performance.now() - t0;
       return had;
     },
 

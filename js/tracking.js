@@ -3,11 +3,11 @@
 // Единицы внутри content: ширина метки = 1, центр метки = (0,0,0), ось Z смотрит от метки вверх.
 import * as THREE from 'three';
 import { MindARThree } from 'mindar-image-three';
-import { createHybrid } from './hybrid.js?v=5.3h';
+import { createHybrid } from './hybrid.js?v=5.4h';
 
 export function createTracker(opts) {
   const { container, markerUrl, CF, BETA, MISS, WARM, SYNC, RAW, JUMP, NOGUARD, onFound, onLost, onStall, onFatal,
-          imu, USE_IMU = true, TOL = 20, IMULAG = 0, KMW = 0.03, COAST = 500, PREDICT = 1, CAMFPS = 60, JERK = 1, JERKA = 10, JERKW = 200, HYBRID = 0, HYAGREE = 6, HYOVR = 0,
+          imu, USE_IMU = true, TOL = 20, IMULAG = 0, KMW = 0.03, COAST = 500, PREDICT = 1, CAMFPS = 60, JERK = 1, JERKA = 10, JERKW = 200, HYBRID = 0, HYAGREE = 6, HYOVR = 0, HYBUDGET = 8,
           PMC = 2, PB = 5, DMC = 0.6, DB = 2, RMC, RB, DC = 1, FOV = 66 } = opts;
 
   // MindAR просит у камеры только «заднюю камеру» — iPhone тогда снимает 30 кадров/с.
@@ -173,9 +173,13 @@ export function createTracker(opts) {
         if (haveFrameUp) imu.gravityUp(upFrame, gSign);
       }
       frameUpdated = false; hySeedFrom = null;
-      if (isNew && hy) hySafe(hybridFrame); else if (!isNew) { hyValid = false; }
+      // MindAR сначала рисует кадр на свой холст; поиск метки начнётся уже после возврата отсюда,
+      // поэтому подсказку (позу потока) можно поставить и после — а кадр взять готовым с его холста
+      const res = orig(input);
+      if (isNew && hy && hyTurn()) hySafe(() => hybridFrame(loader.context && loader.context.canvas));
+      else hyValid = false;
       if (PREDICT && !hyValid) predictPose();
-      return orig(input);
+      return res;
     };
     loader.__imuHooked = true;
   }
@@ -187,6 +191,21 @@ export function createTracker(opts) {
   //    возвращаем его в режим слежения с позой потока, без долгого поиска с нуля.
   //  • Когда MindAR и поток согласны — точки потока периодически пересеваем по MindAR (убираем накопленный увод).
   let hy = HYBRID ? createHybrid() : null;
+  // Самоограничение: гибрид не должен тормозить телефон сильнее, чем помогает.
+  // Если в среднем дольше HYBUDGET мс на кадр (1,5 с подряд) — шаг вниз:
+  //   0: копия кадра ½, каждый кадр → 1: копия ~⅓ → 2: ~⅓ через кадр → 3: выключен.
+  let hyLevel = 0, hyOverSince = null, hyFrameN = 0;
+  const hyTurn = () => (++hyFrameN, hyLevel < 2 || hyFrameN % 2 === 0);
+  function hyBudget(now) {
+    const perFrame = hyLevel >= 2 ? hyStats.ms / 2 : hyStats.ms;      // через кадр — в среднем вдвое дешевле
+    if (perFrame <= HYBUDGET) { hyOverSince = null; return; }
+    if (hyOverSince === null) { hyOverSince = now; return; }
+    if (now - hyOverSince < 1500) return;
+    hyOverSince = null; hyLevel++;
+    if (hyLevel === 1) { hy = createHybrid({ scale: 0.34 }); hyStats.ms = HYBUDGET; }
+    if (hyLevel >= 3) { hy = null; hyValid = false; }
+    console.log('[гибрид] дорого для телефона (' + hyStats.ms.toFixed(1) + ' мс) — ' + ['', 'кадр поменьше', 'через кадр', 'выключен'][Math.min(3, hyLevel)]);
+  }
   // любая ошибка в гибриде не должна ронять распознавание: выключаем гибрид, MindAR работает как обычно
   function hySafe(fn) {
     try { fn(); } catch (e) {
@@ -194,7 +213,7 @@ export function createTracker(opts) {
       hy = null; hyValid = false; hyDriving = false;
     }
   }
-  const hyStats = { ms: 0, drive: 0, override: 0, revive: 0, diff: 0, seedT: 0, disagree: 0 };
+  const hyStats = { ms: 0, grab: 0, drive: 0, override: 0, revive: 0, diff: 0, seedT: 0, disagree: 0 };
   let hyValid = false, hyH = null, hyM = null, hyDriving = false, hyShowUntil = -1e9, hyHoldUntil = -1e9, hySeedFrom = null;
   // Потоку без подтверждения MindAR верим недолго: он может «зацепиться» за фон и уверенно вести не туда.
   const HY_TRUST_MS = 700;
@@ -237,14 +256,17 @@ export function createTracker(opts) {
   }
   const markerDims = () => mindar.controller.markerDimensions[0];
   // новый кадр: следим за точками; поза потока — подсказка MindAR
-  function hybridFrame() {
+  function hybridFrame(src) {
     hyValid = false;
     const ctrl = mindar.controller, ts = ctrl && ctrl.trackingStates[0];
     if (!hy || !ts || frozen || videoRotated() || !ctrl.projectionTransform) return;
     const t0 = performance.now();
-    hy.grab(mindar.video);
+    hy.grab(src && src.width ? src : mindar.video);
     const h = hy.track();
     hyStats.ms = hyStats.ms * 0.9 + (performance.now() - t0) * 0.1;
+    hyStats.grab = hyStats.grab * 0.9 + hy.stats.grabMs * 0.1;
+    hyBudget(performance.now());
+    if (!hy) return;                                              // самоограничение только что выключило гибрид
     if (!h) return;
     const M = HtoM(h);
     if (!M) return;
@@ -833,7 +855,7 @@ export function createTracker(opts) {
     get loops() { return loopRuns; },
     // самые длинные паузы с прошлого вызова, мс
     takeGaps() { const g = { pose: gaps.pose, proc: gaps.proc }; gaps.pose = gaps.proc = 0; return g; },
-    get hybrid() { return hy ? { on: true, pts: hy.count, ms: hyStats.ms, drive: hyStats.drive, override: hyStats.override, revive: hyStats.revive, diff: hyStats.diff, seeds: hy.stats.seeds } : { on: false }; },
+    get hybrid() { return hy ? { on: true, level: hyLevel, pts: hy.count, ms: hyStats.ms, grab: hyStats.grab, drive: hyStats.drive, override: hyStats.override, revive: hyStats.revive, diff: hyStats.diff, seeds: hy.stats.seeds } : { on: false, level: HYBRID ? hyLevel : -1 }; },
     // Лёгкий режим для слабых телефонов: камера 30 кадров/с (слабый трекер больше не успевает).
     // Чёткость рендера НЕ понижаем: на старом Android (трекер 15 Гц) это не ускорило трекер —
     // он упирается в процессор, а не в видеокарту, — а картинка становилась мыльной.

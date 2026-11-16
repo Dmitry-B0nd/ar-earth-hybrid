@@ -218,13 +218,13 @@
 import * as THREE from 'three';
 import Stats from 'three/addons/libs/stats.module.js';
 // ?v=… в адресах — чтобы браузер не взял старую версию файла из кэша
-import { createTracker } from './js/tracking.js?v=5.3h';
-import { createEarth, loadEarthTextures } from './js/earth.js?v=5.3h';
-import { createImu } from './js/imu.js?v=5.3h';
-import { createViewer3D } from './js/viewer3d.js?v=5.3h';
-import { createSatellites, loadSatellites } from './js/satellites.js?v=5.3h';
-import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=5.3h';
-const BUILD = '5.3h';
+import { createTracker } from './js/tracking.js?v=5.4h';
+import { createEarth, loadEarthTextures } from './js/earth.js?v=5.4h';
+import { createImu } from './js/imu.js?v=5.4h';
+import { createViewer3D } from './js/viewer3d.js?v=5.4h';
+import { createSatellites, loadSatellites } from './js/satellites.js?v=5.4h';
+import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=5.4h';
+const BUILD = '5.4h';
 console.log('[сборка]', BUILD, '| poi.js:', POI_VERSION);
 if (POI_VERSION !== BUILD) console.error('Файлы разных версий! index.html =', BUILD, ', js/poi.js =', POI_VERSION);
 
@@ -250,7 +250,7 @@ const P = {
   CAMFPS: num('camfps', 60),
   // рывок: при ускорении > jerka м/с² или повороте > jerkw °/с сцену быстро гасим и ищем метку заново (jerk=0 — выключить)
   // гибридный трекер (экспериментальная ветка): оптический поток в помощь MindAR; hybrid=0 — как в 4.14
-  HYBRID: num('hybrid', 1), HYAGREE: num('hyagree', 6),
+  HYBRID: num('hybrid', 1), HYAGREE: num('hyagree', 6), HYBUDGET: num('hybudget', 8),
   // hyovr=1 — поток может перебивать позу MindAR при сильном расхождении (в 5.0h было включено)
   HYOVR: num('hyovr', 0),
   JERK: num('jerk', 1), JERKA: num('jerka', 10), JERKW: num('jerkw', 200),
@@ -702,8 +702,9 @@ async function start(mode) {
   };
   const hyLine = () => {
     const h = tracker.hybrid;
-    if (!h.on) return 'гибрид: выкл\n';
-    return `гибрид: точек ${h.pts}  ${h.ms.toFixed(1)} мс  расх. ${h.diff.toFixed(1)} px\n  свой ${h.drive}  поправил ${h.override}  вернул ${h.revive}  посев ${h.seeds}\n`;
+    if (!h.on) return h.level >= 3 ? 'гибрид: выкл (дорого для телефона)\n' : 'гибрид: выкл\n';
+    const lv = ['', '  кадр ⅓', '  ⅓ через кадр'][h.level] || '';
+    return `гибрид: точек ${h.pts}  ${h.ms.toFixed(1)} мс (кадр ${h.grab.toFixed(1)})${lv}\n  свой ${h.drive}  вернул ${h.revive}  посев ${h.seeds}  расх. ${h.diff.toFixed(1)} px\n`;
   };
   if (window.DEV) setInterval(() => {
     paramsBox.textContent = `сборка ${BUILD}\n` +
