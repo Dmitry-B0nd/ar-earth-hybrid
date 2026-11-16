@@ -3,10 +3,11 @@
 // Единицы внутри content: ширина метки = 1, центр метки = (0,0,0), ось Z смотрит от метки вверх.
 import * as THREE from 'three';
 import { MindARThree } from 'mindar-image-three';
+import { createHybrid } from './hybrid.js?v=5.0h';
 
 export function createTracker(opts) {
   const { container, markerUrl, CF, BETA, MISS, WARM, SYNC, RAW, JUMP, NOGUARD, onFound, onLost, onStall, onFatal,
-          imu, USE_IMU = true, TOL = 20, IMULAG = 0, KMW = 0.03, COAST = 500, PREDICT = 1, CAMFPS = 60, JERK = 1, JERKA = 10, JERKW = 200,
+          imu, USE_IMU = true, TOL = 20, IMULAG = 0, KMW = 0.03, COAST = 500, PREDICT = 1, CAMFPS = 60, JERK = 1, JERKA = 10, JERKW = 200, HYBRID = 0, HYAGREE = 6,
           PMC = 2, PB = 5, DMC = 0.6, DB = 2, RMC, RB, DC = 1, FOV = 66 } = opts;
 
   // MindAR просит у камеры только «заднюю камеру» — iPhone тогда снимает 30 кадров/с.
@@ -123,6 +124,7 @@ export function createTracker(opts) {
   function redetect(now, dev, kind) {
     const ts0 = mindar.controller && mindar.controller.trackingStates[0];
     if (ts0) ts0.isTracking = false;                // MindAR на следующем кадре распознает метку с нуля
+    if (hy) { hy.reset(); hyHoldUntil = now + 400; }
     lastRedetect = now; stats.redetect++; devAvg = null; recentN = 0;
     while (redetects.length && now - redetects[0].t > 12000) redetects.shift();
     redetects.push({ t: now, dev });
@@ -166,12 +168,128 @@ export function createTracker(opts) {
         haveFrameUp = !haveFrameQ && !!(imu && imu.gravFresh && imu.gravFresh());
         if (haveFrameUp) imu.gravityUp(upFrame, gSign);
       }
-      frameUpdated = false;
-      if (PREDICT) predictPose();
+      frameUpdated = false; hySeedFrom = null;
+      if (isNew && HYBRID) hybridFrame(); else if (!isNew) { hyValid = false; }
+      if (PREDICT && !hyValid) predictPose();
       return orig(input);
     };
     loader.__imuHooked = true;
   }
+  // ---- Гибрид: оптический поток в помощь MindAR (экспериментальная ветка) ----
+  // На каждом новом кадре быстрый трекер (js/hybrid.js) следит за 30–60 точками метки и даёт её позу.
+  //  • Эта поза — подсказка MindAR, откуда начинать поиск (вместо прогноза по скорости).
+  //  • MindAR нашёл позу, а поток с ним сильно не согласен (MindAR «тащит» на смазе) — верим потоку.
+  //  • MindAR на кадре сорвался — на экран идёт поза потока; MindAR потерял метку — сразу
+  //    возвращаем его в режим слежения с позой потока, без долгого поиска с нуля.
+  //  • Когда MindAR и поток согласны — точки потока периодически пересеваем по MindAR (убираем накопленный увод).
+  const hy = HYBRID ? createHybrid() : null;
+  const hyStats = { ms: 0, drive: 0, override: 0, revive: 0, diff: 0, sinceSeed: 0, disagree: 0 };
+  let hyValid = false, hyH = null, hyM = null, hyDriving = false, hyShowUntil = -1e9, hyHoldUntil = -1e9, hySeedFrom = null;
+  // Потоку без подтверждения MindAR верим недолго: он может «зацепиться» за фон и уверенно вести не туда.
+  const HY_TRUST_MS = 700;
+  let hyConfirmed = -1e9, hyRevived = false, hyReviveFails = 0;
+  const hyM4 = new THREE.Matrix4();
+  const P3 = () => mindar.controller.projectionTransform;
+  // поза MindAR (3×4) → гомография «метка → вход»: H = P·[r1 r2 t]
+  function MtoH(M) {
+    const P = P3(), h = new Array(9);
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+      const c = j === 2 ? 3 : j;
+      h[i * 3 + j] = P[i][0] * M[0][c] + P[i][1] * M[1][c] + P[i][2] * M[2][c];
+    }
+    return h;
+  }
+  // гомография → поза: [r1 r2 t] = λ·P⁻¹·H, поворот доводим до ортогонального
+  function HtoM(h) {
+    const P = P3();
+    const a = P[0][0], b = P[0][1], c = P[0][2], d = P[1][0], e = P[1][1], f = P[1][2], g = P[2][0], k = P[2][1], l = P[2][2];
+    const A = e * l - f * k, B = -(d * l - f * g), C = d * k - e * g, det = a * A + b * B + c * C;
+    if (Math.abs(det) < 1e-12) return null;
+    const Pi = [[A / det, -(b * l - c * k) / det, (b * f - c * e) / det], [B / det, (a * l - c * g) / det, -(a * f - c * d) / det], [C / det, -(a * k - b * g) / det, (a * e - b * d) / det]];
+    const col = (j) => [0, 1, 2].map((i) => Pi[i][0] * h[j] + Pi[i][1] * h[3 + j] + Pi[i][2] * h[6 + j]);
+    let r1 = col(0), r2 = col(1), t = col(2);
+    const n1 = Math.hypot(...r1), n2 = Math.hypot(...r2);
+    let lam = 2 / (n1 + n2);
+    if (t[2] * lam < 0) lam = -lam;                                   // метка перед камерой
+    r1 = r1.map((v) => v / n1 * Math.sign(lam)); r2 = r2.map((v) => v / n2 * Math.sign(lam)); t = t.map((v) => v * lam);
+    // ортогонализация: биссектрисы
+    const s = r1.map((v, i) => v + r2[i]), q = r1.map((v, i) => v - r2[i]);
+    const ns = Math.hypot(...s), nq = Math.hypot(...q);
+    const u = s.map((v) => v / ns), w = q.map((v) => v / nq);
+    r1 = u.map((v, i) => (v + w[i]) / Math.SQRT2); r2 = u.map((v, i) => (v - w[i]) / Math.SQRT2);
+    const r3 = [r1[1] * r2[2] - r1[2] * r2[1], r1[2] * r2[0] - r1[0] * r2[2], r1[0] * r2[1] - r1[1] * r2[0]];
+    return [0, 1, 2].map((i) => [r1[i], r2[i], r3[i], t[i]]);
+  }
+  function setAnchorFromM(M) {
+    hyM4.fromArray(mindar.controller._glModelViewMatrix(M, 0)).multiply(mindar.postMatrixs[0]);
+    anchor.group.matrix.copy(hyM4);
+  }
+  const markerDims = () => mindar.controller.markerDimensions[0];
+  // новый кадр: следим за точками; поза потока — подсказка MindAR
+  function hybridFrame() {
+    hyValid = false;
+    const ctrl = mindar.controller, ts = ctrl && ctrl.trackingStates[0];
+    if (!hy || !ts || frozen || videoRotated() || !ctrl.projectionTransform) return;
+    const t0 = performance.now();
+    hy.grab(mindar.video);
+    const h = hy.track();
+    hyStats.ms = hyStats.ms * 0.9 + (performance.now() - t0) * 0.1;
+    hyStats.sinceSeed++;
+    if (!h) return;
+    const M = HtoM(h);
+    if (!M) return;
+    const now = performance.now();
+    if (now - hyConfirmed > HY_TRUST_MS) { hy.reset(); return; }         // давно не подтверждён — не верим
+    hyH = h; hyM = M; hyValid = true;
+    hyRevived = false;
+    if (ts.isTracking) ts.currentModelViewTransform = M.map((r) => r.slice());
+    // MindAR потерял метку, а поток уверенно её держит — сразу в режим слежения, без поиска с нуля
+    else if (hy.count >= 20 && hy.inlierRatio >= 0.7 && now > hyHoldUntil) {
+      ts.currentModelViewTransform = M.map((r) => r.slice());
+      ts.isTracking = true; hyRevived = true; hyStats.revive++;
+    }
+  }
+  // MindAR дал позу: сверяем с потоком
+  function hybridCheck(ts) {
+    if (!ts || !ts.currentModelViewTransform || !mindar.controller.projectionTransform) return;
+    const hm = MtoH(ts.currentModelViewTransform), [mw, mh] = markerDims();
+    hyReviveFails = 0;
+    if (!hyValid) { hySeedFrom = hm; hyConfirmed = performance.now(); return; }
+    const d = hy.diff(hm, hyH, mw, mh);
+    hyStats.diff = d;
+    if (d > HYAGREE && hy.count >= 15 && hy.inlierRatio >= 0.7 && hyStats.disagree < 20) {
+      // MindAR «тащит» (смаз) — берём позу потока; но если не согласны долго — прав MindAR
+      hyStats.disagree++; hyStats.override++;
+      ts.currentModelViewTransform = hyM.map((r) => r.slice());
+      setAnchorFromM(hyM);
+    } else {
+      if (d <= HYAGREE) { hyStats.disagree = 0; hyConfirmed = performance.now(); }
+      else { hy.reset(); hyStats.disagree = 0; hyConfirmed = performance.now(); }   // долгое несогласие: поток сбился — пересеем по MindAR
+      hySeedFrom = hm;
+    }
+  }
+  // кадр обработан: если MindAR позы не дал — показываем позу потока; при необходимости пересеваем точки
+  function hybridAfter() {
+    const now = performance.now();
+    // «вернули» MindAR в слежение, а он метку по позе потока не нашёл — дважды подряд: поток сбился
+    if (hyRevived) {
+      const ts = mindar.controller.trackingStates[0];
+      if (!ts.isTracking && ++hyReviveFails >= 2) { hy.reset(); hyHoldUntil = now + 1000; hyReviveFails = 0; hyValid = false; }
+      hyRevived = false;
+    }
+    if (!frameUpdated && hyValid && !frozen && !jerkingNow()) {
+      setAnchorFromM(hyM);
+      hyDriving = true; hyShowUntil = now + 250;
+      anchor.onTargetUpdate();
+      hyDriving = false;
+      if (frameUpdated) hyStats.drive++;
+    }
+    if (hySeedFrom && (hy.count < 32 || hyStats.sinceSeed > 45)) {
+      const [mw, mh] = markerDims();
+      if (hy.seed(hySeedFrom, mw, mh)) hyStats.sinceSeed = 0;
+    }
+  }
+
   // ---- Рывок ----
   // На резком рывке кадр смазан, и трекер часто «тащит» позу за телефоном — сцена улетает.
   // Акселерометр и гироскоп замечают рывок мгновенно: на это время камере не верим, сцену быстро
@@ -264,9 +382,12 @@ export function createTracker(opts) {
   anchor.onTargetUpdate = () => {
     if (frozen) return;                                     // «заморожено»: позу не трогаем
     if (jerkingNow()) return;                               // рывок: позам с камеры не верим
-    if (!anchor.group.visible) { accepted = false; suspect = 0; return; }
-    const ts = mindar.controller && mindar.controller.trackingStates[0];
-    if (ts && !ts.isTracking) return;                       // трекер потерял метку и повторяет старую позу
+    if (!hyDriving) {                                       // (поза от гибрида проверки MindAR не проходит)
+      if (!anchor.group.visible) { accepted = false; suspect = 0; return; }
+      const ts = mindar.controller && mindar.controller.trackingStates[0];
+      if (ts && !ts.isTracking) return;                     // трекер потерял метку и повторяет старую позу
+      if (HYBRID) hybridCheck(ts);                          // MindAR нашёл позу — сверяем с оптическим потоком
+    }
     stats.updates++;
     anchor.group.matrix.decompose(cPos, cQ, cS);
     const s = Math.cbrt(Math.abs(cS.x * cS.y * cS.z));
@@ -377,7 +498,7 @@ export function createTracker(opts) {
   const angle = (u, v) => Math.acos(Math.max(-1, Math.min(1, u.dot(v))));
   function smoothPose(now) {
     if (frozen) return;
-    if (!(anchor.group.visible && accepted)) { if (!coastOk) ready = false; last = now; return; }
+    if (!(accepted && (anchor.group.visible || now < hyShowUntil))) { if (!coastOk) ready = false; last = now; return; }
     const dist = aPos.length();
     tDir.copy(aPos).divideScalar(dist);
     if (!ready || RAW) {
@@ -471,6 +592,7 @@ export function createTracker(opts) {
         lastProcessed = realProcessed = performance.now(); loopRuns++;
         // кадр обработан, а позы нет (смаз, перезахват) — поворачиваем сцену по гироскопу этого кадра
         if (PREDICT) predictLearn();
+        if (HYBRID) hybridAfter();
         if (SYNC && !frozen && !frameUpdated && haveFrameQ) coast(qWCframe, frameT);
       }
       orig(data);
@@ -525,6 +647,7 @@ export function createTracker(opts) {
     } else dimsSince = null;
   }
   async function restartAR(reason) {
+    if (hy) hy.reset();
     if (arRestarting) return;
     arRestarting = true;
     console.log('[камера] перезапуск:', reason);
@@ -615,8 +738,9 @@ export function createTracker(opts) {
         const ts0 = mindar.controller && mindar.controller.trackingStates[0];
         if (ts0) ts0.isTracking = false;
         accepted = false; ready = false; pr.M = null;
+        if (hy) hy.reset();
       }
-      const want = jerking ? false : frozen ? frozenWant : ((anchor.group.visible && accepted) || (coastOk && now - lastGood < COAST_MS));
+      const want = jerking ? false : frozen ? frozenWant : ((anchor.group.visible && accepted) || (HYBRID && accepted && now < hyShowUntil) || (coastOk && now - lastGood < COAST_MS));
       // Плавность: при потере метки сцена ещё ~0,25 с стоит на месте (короткие пропуски
       // незаметны), потом за 0,3 с растворяется; при нахождении — быстро проявляется.
       if (want) {
@@ -688,6 +812,7 @@ export function createTracker(opts) {
     },
     get frozen() { return frozen; },
     get loops() { return loopRuns; },
+    get hybrid() { return hy ? { on: true, pts: hy.count, ms: hyStats.ms, drive: hyStats.drive, override: hyStats.override, revive: hyStats.revive, diff: hyStats.diff, seeds: hy.stats.seeds } : { on: false }; },
     // Лёгкий режим для слабых телефонов: камера 30 кадров/с (слабый трекер больше не успевает).
     // Чёткость рендера НЕ понижаем: на старом Android (трекер 15 Гц) это не ускорило трекер —
     // он упирается в процессор, а не в видеокарту, — а картинка становилась мыльной.

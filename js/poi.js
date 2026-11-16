@@ -2,7 +2,7 @@
 // Точки кладутся в ECEF-группу Земли и вращаются вместе с ней.
 import * as THREE from 'three';
 
-export const POI_VERSION = '4.14';   // должна совпадать со сборкой в index.html
+export const POI_VERSION = '5.0h';   // должна совпадать со сборкой в index.html
 const DEG = Math.PI / 180;
 
 // широта/долгота (градусы) → точка на сфере в ECEF (X — Гринвич, Z — северный полюс)

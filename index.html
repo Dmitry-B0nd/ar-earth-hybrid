@@ -218,13 +218,13 @@
 import * as THREE from 'three';
 import Stats from 'three/addons/libs/stats.module.js';
 // ?v=… в адресах — чтобы браузер не взял старую версию файла из кэша
-import { createTracker } from './js/tracking.js?v=4.14';
-import { createEarth, loadEarthTextures } from './js/earth.js?v=4.14';
-import { createImu } from './js/imu.js?v=4.14';
-import { createViewer3D } from './js/viewer3d.js?v=4.14';
-import { createSatellites, loadSatellites } from './js/satellites.js?v=4.14';
-import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=4.14';
-const BUILD = '4.14';
+import { createTracker } from './js/tracking.js?v=5.0h';
+import { createEarth, loadEarthTextures } from './js/earth.js?v=5.0h';
+import { createImu } from './js/imu.js?v=5.0h';
+import { createViewer3D } from './js/viewer3d.js?v=5.0h';
+import { createSatellites, loadSatellites } from './js/satellites.js?v=5.0h';
+import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=5.0h';
+const BUILD = '5.0h';
 console.log('[сборка]', BUILD, '| poi.js:', POI_VERSION);
 if (POI_VERSION !== BUILD) console.error('Файлы разных версий! index.html =', BUILD, ', js/poi.js =', POI_VERSION);
 
@@ -249,7 +249,10 @@ const P = {
   // частота кадров, которую просим у камеры (0 — как решит браузер, обычно 30)
   CAMFPS: num('camfps', 60),
   // рывок: при ускорении > jerka м/с² или повороте > jerkw °/с сцену быстро гасим и ищем метку заново (jerk=0 — выключить)
-  JERK: num('jerk', 1), JERKA: num('jerka', 10), JERKW: num('jerkw', 200),
+  // гибридный трекер (экспериментальная ветка): оптический поток в помощь MindAR; hybrid=0 — как в 4.14
+  HYBRID: num('hybrid', 1), HYAGREE: num('hyagree', 6),
+  // с гибридом гашение на рывке по умолчанию выключено — проверяем, держит ли поток сам (jerk=1 — включить)
+  JERK: num('jerk', q.get('hybrid') === '0' ? 1 : 0), JERKA: num('jerka', 10), JERKW: num('jerkw', 200),
   // угол обзора камеры телефона по длинной стороне кадра, градусы (0 = как в MindAR по умолчанию, 45°)
   FOV: num('fov', 66),
   RAW: q.get('raw') === '1', JUMP: num('jump', 25), NOGUARD: q.get('noguard') === '1',
@@ -688,7 +691,12 @@ async function start(mode) {
     const v = tracker.mindar.video, trk = v && v.srcObject && v.srcObject.getVideoTracks()[0];
     const fr = trk && trk.getSettings ? trk.getSettings().frameRate : null;
     return `камера ${v ? v.videoWidth + '×' + v.videoHeight : '—'}  ${fr ? Math.round(fr) + ' к/с' : ''}  новых ${tracker.stats.newFrames}\n` +
-      `режим: ${lite.on ? 'лёгкий (' + lite.why + ')' : 'обычный'}  рисование ${lite.fps}\n`;
+      `режим: ${lite.on ? 'лёгкий (' + lite.why + ')' : 'обычный'}  рисование ${lite.fps}\n` + hyLine();
+  };
+  const hyLine = () => {
+    const h = tracker.hybrid;
+    if (!h.on) return 'гибрид: выкл\n';
+    return `гибрид: точек ${h.pts}  ${h.ms.toFixed(1)} мс  расх. ${h.diff.toFixed(1)} px\n  свой ${h.drive}  поправил ${h.override}  вернул ${h.revive}  посев ${h.seeds}\n`;
   };
   if (window.DEV) setInterval(() => {
     paramsBox.textContent = `сборка ${BUILD}\n` +
