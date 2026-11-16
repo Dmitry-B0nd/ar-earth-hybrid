@@ -161,7 +161,7 @@ export function createSatellites({ earth, data, scene, artistic = true }) {
 
   // ---- расчёт ----
   const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
-  let lastProp = 0;
+  let lastProp = 0, propCursor = 0;
 
   // фильтр показа: small — 'all' | 'cube' | 'none', context — true/false
   const filter = { small: 'all', context: true };
@@ -218,12 +218,17 @@ export function createSatellites({ earth, data, scene, artistic = true }) {
 
     update(date, renderer, sunDirWorld, camera) {
       const now = performance.now(), t = date.getTime();
-      // обычные точки: полный пересчёт 10 раз в секунду, между пересчётами — по скорости;
-      // контекстные и выбранный — точно в каждом кадре (их мало, а на них смотрят пристально)
-      const full = now - lastProp > propEvery;
-      if (full) lastProp = now;
-      for (const it of items) {
-        const i = it.i;
+      // обычные точки: каждая пересчитывается раз в propEvery мс, между пересчётами — по скорости.
+      // Пересчёт размазан по кадрам (каждый кадр — своя порция), а не весь разом: иначе раз в 100 мс
+      // один кадр получался заметно длиннее остальных (микрофриз).
+      // Контекстные и выбранный — точно в каждом кадре (их мало, а на них смотрят пристально).
+      const NI = items.length;
+      const forceAll = lastProp === 0;
+      const due = forceAll ? NI : Math.min(NI, Math.ceil(NI * Math.min(1, (now - lastProp) / propEvery)));
+      lastProp = now;
+      for (let k = 0; k < NI; k++) {
+        const it = items[k], i = it.i;
+        const full = forceAll || ((k - propCursor + NI) % NI) < due;
         if (!isShown(it)) { size[i] = 0; continue; }
         const precise = it.s.group === 'context' || it === selected;
         if (precise || full || it.t === undefined || Math.abs(t - it.t) > 120e3) prop(it, date);
@@ -235,6 +240,7 @@ export function createSatellites({ earth, data, scene, artistic = true }) {
         size[i] = it === selected ? it.baseSize * 1.5 : it.baseSize;
         if (it.label) it.label.position.copy(tmp2);
       }
+      if (NI) propCursor = (propCursor + due) % NI;
       geo.attributes.position.needsUpdate = true;
       geo.attributes.aSize.needsUpdate = true;
       mat.uniforms.uViewportH.value = renderer.domElement.height;

@@ -19,7 +19,9 @@ export function createHybrid({ scale = 0.5, levels = 4, win = 13, maxPts = 64, m
   let n = 0, inlierRatio = 0;
   const xyPrev = new Float32Array(maxPts * 2), xyCurr = new Float32Array(maxPts * 2), status = new Uint8Array(maxPts);
   const mk = new Float32Array(maxPts * 2);                      // координаты точек на метке
-  const corners = Array.from({ length: 3000 }, () => new jsfeat.keypoint_t());
+  // место под найденные углы: детектор не проверяет границу, поэтому — по числу пикселей кадра
+  // (вблизи метки углов бывают тысячи; в 5.1h при 3000 местах поиск вылетал за край)
+  let corners = [];
   const Hm = new jsfeat.matrix_t(3, 3, jsfeat.F32_t | jsfeat.C1_t);
   const homo = new jsfeat.motion_model.homography2d();
   const rp = new jsfeat.ransac_params_t(4, ransacPx, 0.5, 0.995);
@@ -33,6 +35,7 @@ export function createHybrid({ scale = 0.5, levels = 4, win = 13, maxPts = 64, m
     const a = new jsfeat.pyramid_t(levels), b = new jsfeat.pyramid_t(levels);
     a.allocate(w, h, U8); b.allocate(w, h, U8);
     prev = a; curr = b; hasPrev = false; n = 0;
+    corners = Array.from({ length: w * h }, () => new jsfeat.keypoint_t());
   }
 
   // гомография 3×3 (по строкам) применить к точке
@@ -118,7 +121,8 @@ export function createHybrid({ scale = 0.5, levels = 4, win = 13, maxPts = 64, m
       const s = 0.03;                                            // поля внутри метки (край часто смазан)
       const quad = [[markerW * s, markerH * s], [markerW * (1 - s), markerH * s], [markerW * (1 - s), markerH * (1 - s)], [markerW * s, markerH * (1 - s)]].map(([x, y]) => apply(h, x, y));
       const img = curr.data[0];
-      jsfeat.yape06.laplacian_threshold = 20; jsfeat.yape06.min_eigen_value_threshold = 20;
+      // вблизи метки углов слишком много — порог выше (и быстрее, и надёжнее)
+      jsfeat.yape06.laplacian_threshold = 30; jsfeat.yape06.min_eigen_value_threshold = 25;
       const cnt = jsfeat.yape06.detect(img, corners, 8);
       // равномерно по метке: сетка 8×8, в каждой клетке — сильнейший угол, потом лучшие по силе
       const G = 8, cells = new Map();

@@ -218,13 +218,13 @@
 import * as THREE from 'three';
 import Stats from 'three/addons/libs/stats.module.js';
 // ?v=… в адресах — чтобы браузер не взял старую версию файла из кэша
-import { createTracker } from './js/tracking.js?v=5.1h';
-import { createEarth, loadEarthTextures } from './js/earth.js?v=5.1h';
-import { createImu } from './js/imu.js?v=5.1h';
-import { createViewer3D } from './js/viewer3d.js?v=5.1h';
-import { createSatellites, loadSatellites } from './js/satellites.js?v=5.1h';
-import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=5.1h';
-const BUILD = '5.1h';
+import { createTracker } from './js/tracking.js?v=5.3h';
+import { createEarth, loadEarthTextures } from './js/earth.js?v=5.3h';
+import { createImu } from './js/imu.js?v=5.3h';
+import { createViewer3D } from './js/viewer3d.js?v=5.3h';
+import { createSatellites, loadSatellites } from './js/satellites.js?v=5.3h';
+import { createPoi, loadPoi, POI_VERSION } from './js/poi.js?v=5.3h';
+const BUILD = '5.3h';
 console.log('[сборка]', BUILD, '| poi.js:', POI_VERSION);
 if (POI_VERSION !== BUILD) console.error('Файлы разных версий! index.html =', BUILD, ', js/poi.js =', POI_VERSION);
 
@@ -692,7 +692,13 @@ async function start(mode) {
     const v = tracker.mindar.video, trk = v && v.srcObject && v.srcObject.getVideoTracks()[0];
     const fr = trk && trk.getSettings ? trk.getSettings().frameRate : null;
     return `камера ${v ? v.videoWidth + '×' + v.videoHeight : '—'}  ${fr ? Math.round(fr) + ' к/с' : ''}  новых ${tracker.stats.newFrames}\n` +
-      `режим: ${lite.on ? 'лёгкий (' + lite.why + ')' : 'обычный'}  рисование ${lite.fps}\n` + hyLine();
+      `режим: ${lite.on ? 'лёгкий (' + lite.why + ')' : 'обычный'}  рисование ${lite.fps}\n` + gapLine() + hyLine();
+  };
+  // самые длинные паузы за секунду: кадр отрисовки / обновление позы сцены / обработка кадра камеры
+  const gapLine = () => {
+    const g = tracker.takeGaps(), r = renderGap; renderGap = 0;
+    const f = (v) => Math.round(v) + (v > 60 ? '!' : '');
+    return `паузы, мс: кадр ${f(r)}  поза ${f(g.pose)}  обраб. ${f(g.proc)}\n`;
   };
   const hyLine = () => {
     const h = tracker.hybrid;
@@ -742,7 +748,7 @@ async function start(mode) {
   // ?potato=1 — включить сразу, ?potato=0 — никогда не включать.
   const POTATO = q.get('potato');
   const lite = { on: false, why: '', bad: 0, fps: 0, loops: 0, since: performance.now() };
-  let lastRender = 0, renders = 0;
+  let lastRender = 0, renders = 0, renderGap = 0;
   function setLite(on, why) {
     if (lite.on === on) return;
     lite.on = on; lite.why = why;
@@ -781,6 +787,7 @@ async function start(mode) {
       poi.update(now / 1000, camera);
       if (sats) sats.update(simDate, renderer, earth.sunWorld, camera);
       renderer.render(scene, camera);
+      if (lastRender) renderGap = Math.max(renderGap, now - lastRender);
       lastRender = now; renders++;
     }
     if (stats) stats.update();
